@@ -12,6 +12,6 @@ The following link contains the input features of the training dataset ->
 
 **airbnb_dataset zip file:**
 The following files are included in the zip file:
-1. **airbnb_test_x_2023** -> Dataset contains test data input features
-2. **airbnb_train_y_2023** -> Dataset contains training data output features
+1. **airbnb_test_x_2023**   -> Dataset contains test data input features
+2. **airbnb_train_y_2023**  -> Dataset contains training data output features
 3. **data_dictionary_2023** -> Data dictionary describing the columns
