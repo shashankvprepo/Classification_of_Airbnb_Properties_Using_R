@@ -1,0 +1,1329 @@
+---
+title: "Project"
+author: "svp"
+date: "2023-04-30"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+## BEGIN
+
+We start our code from here.
+
+## Load the required libraries
+```{r}
+library(tidyverse)
+library(ROCR)
+library(caret)
+library("lubridate")
+library(tm)
+library(text2vec)
+library(SnowballC)
+library(glmnet)
+library(vip)
+library(randomForest)
+library(ranger)
+```
+## Load the test dataset.
+```{r}
+options(scipen=999)
+
+airbnb_test <- read_csv("airbnb_test_x_2023.csv")
+summary(airbnb_test)
+```
+
+
+
+
+## Load the dataset.
+```{r}
+airbnb_explore <- read_csv("airbnb_train_x_2023.csv")
+summary(airbnb_explore)
+```
+## Load the train y dataset
+
+```{r}
+airbnb_train_Y <- read_csv("airbnb_train_y_2023.csv")
+
+airbnb_train_Y <- airbnb_train_Y %>%
+  mutate(high_booking_rate = as.factor(high_booking_rate),
+         perfect_rating_score = as.factor(perfect_rating_score))
+```
+
+
+## Merge train and test data to facilitate cleaning.
+```{r}
+airbnb_merge <- rbind(airbnb_explore, airbnb_test)
+summary(airbnb_merge)
+```
+
+## Data cleaning
+
+```{r}
+
+# Clean the cleaning_fee, price, security_deposit and extra_people columns
+
+airbnb_clean <- airbnb_merge %>%
+  mutate(cleaning_fee = parse_number(cleaning_fee, na = c("", "NA"), trim_ws = TRUE),
+         price = parse_number(price, na = c("", "NA"), trim_ws = TRUE),
+         extra_people = parse_number(extra_people, na = c("", "NA"), trim_ws = TRUE),
+         security_deposit = parse_number(security_deposit, na = c("", "NA"), trim_ws = TRUE)) %>%
+  
+  # Impute number of beds by taking into consideration the number of bedrooms
+  group_by(bedrooms) %>%
+  mutate(beds = ifelse(is.na(beds), ceiling(mean(beds, na.rm=TRUE)), beds)) %>%
+  ungroup()
+
+# Replace NA in security deposit with 0
+
+airbnb_clean$security_deposit[is.na(airbnb_clean$security_deposit)] <- 0
+
+summary(airbnb_clean$price_for_extra)
+
+# Regroup the property_type into a new column called property_category
+# Regroup the bed_type into new column called bed_category
+airbnb_clean <- airbnb_clean %>%
+  mutate(bed_category = ifelse(bed_type == "Real Bed", "bed", "other"),
+         property_category = case_when(
+           property_type %in% c("Apartment","Serviced apartment","Loft", "Aparthotel") ~ "apartment",
+           property_type %in% c("Bed & Breakfast","Bed and breakfast","Boutique hotel","Hostel") ~ "hotel",
+           property_type %in% c("Townhouse","Condominium") ~ "condo",
+           property_type %in% c("Bungalow","House","Castle","Cottage","Vacation home","Villa","Tiny house","Guesthouse","Guest suite") ~ "house",
+           property_type %in% c("Earth house","Earth House","Farm stay","Cabin","Treehouse","Hut","Nature lodge","Island","Lighthouse","Tent","Yurt","Cave","Chalet") ~ "exquisite",
+           property_type %in% c("Dorm","Hostel") ~ "hostel",
+           property_type %in% c("Camper/RV","Boat","Train","Plane") ~ "mobile",
+           TRUE ~ "other"),
+         property_category = as.factor(property_category))
+
+# Regroup the cancellation_policy into new categories
+airbnb_clean <- airbnb_clean %>%
+  mutate(cancellation_policy = case_when(
+           cancellation_policy %in% c("strict","super_strict_30","super_strict_60") ~ "strict",
+           cancellation_policy %in% c("flexible") ~ "flexible",
+           cancellation_policy %in% c("moderate") ~ "moderate",
+           TRUE ~ "no refund"))
+
+# Impute the null values in host_response_time column
+airbnb_clean <- airbnb_clean %>%
+  mutate(host_response_time = ifelse(is.na(host_response_time), "Info Not Available", host_response_time))
+
+# Create a new column indicating number of months since when the listing is available
+airbnb_clean <- airbnb_clean %>%
+  mutate(host_experience_years = interval(host_since, today()) %/% years(1),
+         host_experience_years = ifelse(between(host_experience_years, 5, 9), "5-10 years", ifelse(host_experience_years >= 10, "More than 10 years", "Info Not Available")),
+         host_experience_years = ifelse(is.na(host_experience_years), "Info Not Available", host_experience_years))
+
+
+
+
+airbnb_clean <- airbnb_clean %>%
+  # Calculate the price per person
+  mutate(price_for_extra = (guests_included)*extra_people,
+         total_price = price + security_deposit + cleaning_fee,
+         price_per_person = total_price/accommodates) %>%
+  #price_for_extra
+  #cleaning fee
+  
+  
+  # Impute values for bedrooms, bathrooms and cleaning_fee
+  # Calculate price per person index
+  # Regroup Market categories
+  group_by(property_category) %>%
+  mutate(ppp_ind = ifelse(price_per_person > median(price_per_person, na.rm= TRUE), 1, 0),
+         bathrooms = ifelse(is.na(bathrooms), ceiling(mean(bathrooms, na.rm=TRUE)), bathrooms),
+         bedrooms = ifelse(is.na(bedrooms), ceiling(mean(bedrooms, na.rm=TRUE)), bedrooms),
+         cleaning_fee = ifelse(is.na(cleaning_fee), round(mean(cleaning_fee, na.rm=TRUE), 2), cleaning_fee)) %>%
+  ungroup() %>%
+  group_by(market) %>%
+  mutate(market = ifelse( n() < 300, "OTHER", market)) %>%
+  ungroup() %>%
+  
+  # Create a new column has_cleaning_fee
+  # Create a new column charges_for_extra
+  # Create a new column has_security_deposit
+  # Impute values for market and host_listings_count
+  mutate(market = ifelse(is.na(market), "OTHER", market),
+         host_listings_count = ifelse(is.na(host_listings_count), 0, host_listings_count),
+         has_cleaning_fee = ifelse(cleaning_fee != 0, "YES", "NO"),
+         charges_for_extra = as.factor(ifelse(extra_people > 0, "YES", "NO")),
+         has_security_deposit = ifelse(security_deposit == 0 | is.na(security_deposit), "NO", "YES"),
+         one_bed_per_person = ifelse(beds/accommodates < 1 , "NO", "YES"),
+         number_of_guests_included = ifelse(guests_included == 0, "None", ifelse(guests_included == 1, "One", "More than One")),
+         occupancy = guests_included/accommodates,
+         bathrooms_per_person = bathrooms/accommodates)
+
+# Impute values for host_is_superhost, host_identity_verified, is_business_travel_ready
+# Create new columns host_acceptance, host_response and has_min_nights
+airbnb_clean <- airbnb_clean %>%
+  mutate(host_is_superhost = ifelse(is.na(host_is_superhost), FALSE, host_is_superhost),
+         host_identity_verified = ifelse(is.na(host_identity_verified), FALSE, host_identity_verified),
+         host_has_profile_pic  = ifelse(is.na(host_has_profile_pic), FALSE, host_has_profile_pic),
+         is_about_host_info  = ifelse(is.na(host_about), FALSE, TRUE),
+         is_business_travel_ready = ifelse(is.na(is_business_travel_ready), FALSE, is_business_travel_ready),
+         host_acceptance = as.factor(ifelse(is.na(host_acceptance_rate), "MISSING", ifelse(host_acceptance_rate == "100%", "ALL", "SOME"))),
+         host_response = as.factor(ifelse(is.na(host_response_rate), "MISSING", ifelse(host_response_rate == "100%", "ALL", "SOME"))),
+         has_min_nights = as.factor(ifelse(minimum_nights > 1, "YES", "NO")),
+         has_min_weeks = as.factor(ifelse(minimum_nights > 6, "YES", "NO")),
+         has_house_rules = as.factor(ifelse(is.na(house_rules), "NO", "YES")),
+         has_weekly_price = as.factor(ifelse(is.na(weekly_price), "NO", "YES")),
+         has_monthly_price = as.factor(ifelse(is.na(monthly_price), "NO", "YES")),
+         has_access_info = as.factor(ifelse(is.na(access), "NO", "YES")))
+
+# Number of amenities and has_hotel_license
+airbnb_clean <- airbnb_clean %>%
+  mutate(number_of_amenities = str_count(amenities, "\\w+"),
+         number_of_id_verification_options = str_count(host_verifications, "\\w+"),
+         has_hotel_license = ifelse(is.na(license), "No License", ifelse(grepl("pending", tolower(license), fixed=TRUE), "License Pending", "Has Hotel License")),
+         minimum_weeks = as.integer(minimum_nights/7),
+         maximum_weeks = as.integer(maximum_nights/7))
+
+# Create new columns for availabilities
+airbnb_clean <- airbnb_clean %>%
+  mutate(availablity_30_perc = availability_30/30,
+         availablity_60_perc = availability_60/60,
+         availablity_90_perc = availability_90/90,
+         availablity_365_perc = availability_365/365,
+         # check if the property and host are located in the same neighborhood
+         host_and_property_same_neighborhood = ifelse((!(is.na(host_neighbourhood) | is.na(neighbourhood)) & (host_neighbourhood == neighbourhood)), "YES", "NO"))
+
+
+# Convert to factors
+airbnb_clean <- airbnb_clean %>%
+  mutate(property_category = as.factor(property_category),
+         bed_category = as.factor(bed_category),
+         ppp_ind = as.factor(ppp_ind),
+         cancellation_policy = as.factor(cancellation_policy),
+         room_type = as.factor(room_type),
+         instant_bookable = as.factor(instant_bookable),
+         has_cleaning_fee = as.factor(has_cleaning_fee),
+         has_security_deposit = as.factor(has_security_deposit),
+         market = as.factor(market),
+         room_type = as.factor(room_type),
+         host_response_time = as.factor(host_response_time),
+         host_experience_years = as.factor(host_experience_years),
+         host_and_property_same_neighborhood = as.factor(host_and_property_same_neighborhood),
+         is_about_host_info = as.factor(is_about_host_info))
+
+
+#view(airbnb_clean$amenities_word_count)
+
+summary(airbnb_clean)
+
+head(airbnb_clean$number_of_amenities)
+
+#table(airbnb_clean$has_min_weeks)
+
+#table(airbnb_clean$has_min_nights, airbnb_clean$room_type)
+
+airbnb_clean$total_price <- ifelse(is.na(airbnb_clean$total_price), 0, airbnb_clean$total_price)
+
+
+table(airbnb_clean$host_and_property_same_neighborhood)
+```
+
+# Utilize Name_Gender dataset to identify the host gender
+```{r}
+names_gender <- read_csv("name_gender_dataset.csv")
+
+airbnb_clean$host_gender <- names_gender$Gender[match(gsub("\\s.*", "", airbnb_clean$host_name), names_gender$Name)]
+
+table(airbnb_clean$host_gender)
+sum(is.na(airbnb_clean$host_gender))
+
+# airbnb_clean_na <- airbnb_clean %>%
+#   select(host_name, host_gender, host_gender_new)
+
+airbnb_clean$host_gender[is.na(airbnb_clean$host_gender)] <- "Unknown"
+
+table(airbnb_clean$host_gender)
+airbnb_clean <- airbnb_clean %>%
+  mutate(host_gender = as.factor(host_gender))
+```
+
+
+# Utilizing Attractions dataset to find the distance from the nearest attraction place and total count of attraction within approx 2 miles.
+```{r}
+attractions <- read_csv("All_States_Offbeat_Tourist_Attractions.csv")
+
+# Define the distance function
+distance <- function(lat1, long1, lat2, long2) {
+  R <- 6373.0
+  lat1 <- radians(lat1)
+  long1 <- radians(long1)
+  lat2 <- radians(lat2)
+  long2 <- radians(long2)
+  
+  dlong <- long2 - long1
+  dlat <- lat2 - lat1
+  
+  a <- sin(dlat / 2)^2 + cos(lat1) * cos(lat2) * sin(dlong / 2)^2
+  c <- 2 * atan2(sqrt(a), sqrt(1 - a))
+  
+  distance <- R * c
+  
+  return(distance)
+}
+
+# Define the radians function
+radians <- function(x) {
+  return(x * pi / 180)
+}
+
+# Initialize variables
+nearest_attr <- attractions$Attraction[1]
+nearest_attr_lat <- attractions$Latitude[1]
+nearest_attr_long <- attractions$Longitude[1]
+```
+
+# Get state name from attractions address
+```{r}
+check_state_abbr <- function(str) {
+  # Load state abbreviations
+  abbr <- state.abb
+  
+  # Split input string by space and punctuation
+  words <- unlist(strsplit(str, "\\W+"))
+  
+  # Check if any words match state abbreviations
+  match <- intersect(words, abbr)
+  
+  # Return the first matching abbreviation, if found
+  if (length(match) > 0) {
+    return(match[1])
+  } else {
+    return(NA)
+  }
+}
+
+state_abbr <- vector("character", nrow(attractions))
+# Loop through each address and apply the check_state_abbr function
+for (i in 1:nrow(attractions)) {
+  state_abbr[i] <- check_state_abbr(attractions$Address[i])
+}
+
+# Add the state abbreviation column to the data frame
+attractions$State_Abbr <- state_abbr
+
+sum(is.na(attractions$State_Abbr))
+
+attractions <- na.omit(attractions)
+nrow(attractions)
+```
+
+# Cleaning the state column
+```{r}
+state_attractions <- table(attractions$State_Abbr)
+state_counts_airbnb <- table(airbnb_clean$state)
+sum(state_counts_airbnb)
+
+print(table(airbnb_clean$state))
+
+airbnb_clean <- airbnb_clean %>%
+  mutate(state = case_when(
+           state %in% c("ca","Ca", "CA") ~ "CA",
+           state %in% c("il", "IL") ~ "IL",
+           state %in% c("New York", "ny", "Ny", "NY") ~ "NY",
+           state %in% c("CO") ~ "CO",
+           state %in% c("DC") ~ "DC",
+           state %in% c("LA") ~ "LA",
+           state %in% c("MA") ~ "MA",
+           state %in% c("MD") ~ "MD",
+           state %in% c("MP") ~ "MP",
+           state %in% c("NC") ~ "NC",
+           state %in% c("NJ") ~ "NJ",
+           state %in% c("OR") ~ "OR",
+           state %in% c("TN") ~ "TN",
+           state %in% c("TX") ~ "TX",
+           state %in% c("WA") ~ "WA",
+           TRUE ~ "other"))
+```
+
+
+# Calculate the distance between the aitbnb and the nearest attraction
+```{r}
+nearest_attr_lat <- attractions$Latitude[1]
+nearest_attr_long <- attractions$Longitude[1]
+
+#airbnb_new <- airbnb_clean
+airbnb_clean$nearest_attr <- ""
+airbnb_clean$nearest_attr_lat <- 0
+airbnb_clean$nearest_attr_long <- 0
+airbnb_clean$nearest_attr_dist <- 0
+airbnb_clean$nearest_attr_count <- 0
+
+for (n in 1:nrow(airbnb_clean)) {
+  
+  attractions_state <-
+  attractions[attractions$State_Abbr == airbnb_clean$state[n], ]
+  
+  list_lat <- airbnb_clean$latitude[n]
+  list_long <- airbnb_clean$longitude[n]
+  if (nrow(attractions_state) > 0 && !is.na(list_lat) && !is.na(list_long)) {
+    dist_nearest <-
+      distance(list_lat,
+               list_long,
+               nearest_attr_lat,
+               nearest_attr_long)
+    
+    for (i in 2:nrow(attractions_state)) {
+      attr_lat <- attractions_state$Latitude[i]
+      attr_long <- attractions_state$Longitude[i]
+      
+      if (!is.na(list_lat) &&
+          !is.na(list_long) &&
+          !is.na(attr_lat) &&
+          !is.na(attr_long)) {
+        dist <- distance(list_lat, list_long, attr_lat, attr_long)
+        
+        if (dist < dist_nearest) {
+          
+          if (dist < 4){
+            airbnb_clean$nearest_attr_count[n] <- airbnb_clean$nearest_attr_count[n] + 1
+          }
+          else if (dist == 0)
+          {
+            airbnb_clean$nearest_attr_count[n] <- 0
+          }
+          
+          nearest_attr <- attractions_state$Attraction[i]
+          nearest_attr_lat <- attractions_state$Latitude[i]
+          nearest_attr_long <- attractions_state$Longitude[i]
+          dist_nearest <- dist
+          
+          airbnb_clean$nearest_attr[n] <- nearest_attr
+          airbnb_clean$nearest_attr_lat[n] <- nearest_attr_lat
+          airbnb_clean$nearest_attr_long[n] <- nearest_attr_long
+          airbnb_clean$nearest_attr_dist[n] <- dist_nearest
+        }
+        
+      }
+      
+    }
+  }
+  
+}
+```
+
+# Replacing the nearest attraction distance with the mean distance for the values who had 0 in them
+```{r}
+mean(airbnb_clean$nearest_attr_dist)
+sum(airbnb_clean$nearest_attr_dist == 1)
+unique(airbnb_clean$nearest_attr_count)
+table(airbnb_clean$nearest_attr_count)
+
+mean_dist <- mean(airbnb_clean$nearest_attr_dist[airbnb_clean$nearest_attr_dist != 0])
+airbnb_clean$nearest_attr_dist[airbnb_clean$nearest_attr_dist == 0] <- mean_dist
+```
+
+
+## Perform text mining on host_verifications column
+
+```{r}
+
+# Extract mulitple features from host_verifications column
+
+# Steps 1/2: preprocess and tokenize
+# uncomment some of these lines to change the preprocessing and tokenization
+# see the options in https://cran.r-project.org/web/packages/tm/tm.pdf
+cleaning_tokenizer <- function(v) {
+  v %>%
+    removeNumbers %>% #remove all numbers
+    removePunctuation %>% #remove all punctuation
+    removeWords(stopwords(kind="en")) %>% #remove stopwords
+    stemDocument %>%
+    word_tokenizer 
+}
+
+# Iterate over the individual documents and convert them to tokens
+# Uses the function defined above.
+it_train = itoken(airbnb_clean$host_verifications, 
+                  preprocessor = tolower, #preprocessing by converting to lowercase
+                  tokenizer = cleaning_tokenizer, 
+                  #ids = labeled_tweets$id, 
+                  progressbar = FALSE)
+
+#Include ngrams
+vocab <- create_vocabulary(it_train)
+
+#Prune the voacabulary
+vocab_final = prune_vocabulary(vocab, doc_proportion_min = 0.1, doc_proportion_max = 0.8)
+
+vocab_final
+
+# Step 3: Vectorize 
+ 
+# Create a vectorizer object using the vocabulary we learned
+vectorizer = vocab_vectorizer(vocab_final)
+
+# Convert the training documents into a DTM
+dtm_train = create_dtm(it_train, vectorizer)
+dim(dtm_train)
+
+# Convert the sparse matrix into dense matrix
+verification_dtm_dense <- as.matrix(dtm_train)
+
+
+# Merge the columnn to the original airbnb_clean dataset
+airbnb_clean <- cbind(airbnb_clean, verification_dtm_dense)
+
+
+airbnb_clean <- airbnb_clean %>%
+  mutate(offlinegovernmentid = as.factor(offlinegovernmentid),
+         workemail = as.factor(workemail),
+         governmentid = as.factor(governmentid),
+         facebook = as.factor(facebook),
+         kba = as.factor(kba),
+         jumio = as.factor(jumio))
+
+```
+
+## Perform text mining on transit column
+
+```{r}
+
+# Extract mulitple features from transit column
+
+# Steps 1/2: preprocess and tokenize
+# uncomment some of these lines to change the preprocessing and tokenization
+# see the options in https://cran.r-project.org/web/packages/tm/tm.pdf
+cleaning_tokenizer <- function(v) {
+  v %>%
+    removeNumbers %>% #remove all numbers
+    removePunctuation %>% #remove all punctuation
+    removeWords(stopwords(kind="en")) %>% #remove stopwords
+    stemDocument %>%
+    word_tokenizer 
+}
+
+# Iterate over the individual documents and convert them to tokens
+# Uses the function defined above.
+transit_it_train = itoken(airbnb_clean$neighborhood_overview, 
+                  preprocessor = tolower, #preprocessing by converting to lowercase
+                  tokenizer = cleaning_tokenizer, 
+                  #ids = labeled_tweets$id, 
+                  progressbar = FALSE)
+
+stop_words = c("NA", "neighborhood")
+
+#Include ngrams
+transit_vocab <- create_vocabulary(transit_it_train, stopwords = stop_words)
+
+#Prune the voacabulary
+transit_vocab_final = prune_vocabulary(transit_vocab, doc_proportion_min = 0.2, doc_proportion_max = 0.8)
+
+transit_vocab_final
+
+# Step 3: Vectorize 
+ 
+# Create a vectorizer object using the vocabulary we learned
+transit_vectorizer = vocab_vectorizer(transit_vocab_final)
+
+# Convert the training documents into a DTM
+transit_dtm_train = create_dtm(transit_it_train, transit_vectorizer)
+dim(transit_dtm_train)
+
+# Convert the sparse matrix into dense matrix
+transit_verification_dtm_dense <- as.matrix(transit_dtm_train)
+
+
+# Merge the columnn to the original airbnb_clean dataset
+airbnb_clean <- cbind(airbnb_clean, transit_verification_dtm_dense)
+
+
+airbnb_clean <- airbnb_clean %>%
+  mutate(park = as.factor(park),
+         shop = as.factor(shop),
+         restaur = as.factor(restaur),
+         walk = as.factor(walk))
+
+```
+
+```{r}
+library(stringr)
+
+# Define the search condition
+amenities_condition <- c("TV", "Air conditioning", "Heating", "Essentials", "Kitchen")
+
+# Initialize Basic_Amenities_Present column as 'N'
+airbnb_clean$Basic_Amenities_Present <- 'N'
+
+# Check if the search condition is satisfied for each row
+for (i in 1:nrow(airbnb_clean)) {
+  amenities_str <- airbnb_clean$amenities[i]
+  if ((str_detect(amenities_str, "Wifi") || str_detect(amenities_str, "Wireless Internet")) &&
+      all(str_detect(amenities_str, amenities_condition))) {
+    airbnb_clean$Basic_Amenities_Present[i] <- 'Y'
+  }
+}
+
+table(airbnb_clean$Basic_Amenities_Present)
+```
+
+# Get if any basic amenities are available or not
+```{r}
+library(stringr)
+
+# Define the search condition
+amenities_condition <- c("Free parking on premises","Family/kid friendly")
+
+# Initialize Basic_Amenities_Present column as 'N'
+airbnb_clean$Basic_amenities_present <- 'N'
+
+# Check if the search condition is satisfied for each row
+for (i in 1:nrow(airbnb_clean)) {
+  amenities_str <- airbnb_clean$amenities[i]
+  if ((str_detect(amenities_str, "Wifi") || str_detect(amenities_str, "Wireless Internet")) &&
+      all(str_detect(amenities_str, amenities_condition))) {
+    airbnb_clean$Basic_Amenities_Present[i] <- 'Y'
+  }
+}
+
+table(airbnb_clean$Basic_Amenities_Present)
+```
+
+
+# Creating new features from existing features
+```{r}
+airbnb_clean$cleaning_fee_less_than_130 <- ifelse(airbnb_clean$cleaning_fee < 130, "Yes", "No")
+airbnb_clean <- airbnb_clean %>% mutate(cleaning_fee_less_than_130 = factor(cleaning_fee_less_than_130))
+
+
+# Convert host_since column to Date format
+airbnb_clean$host_since <- as.Date(airbnb_clean$host_since, format = "%m/%d/%Y")
+
+# Calculate total years of service
+airbnb_clean$total_years_service <- as.integer(difftime(Sys.Date(), airbnb_clean$host_since, units = "days")/365)
+
+# Replace NA values with 0
+airbnb_clean$total_years_service[is.na(airbnb_clean$total_years_service)] <- 0
+
+sum(is.na(airbnb_clean$total_years_service))
+
+
+# Convert first_review column to Date format
+airbnb_clean$first_review <- as.Date(airbnb_clean$first_review, format = "%m/%d/%Y")
+
+# Calculate first review since
+airbnb_clean$first_review_since <- as.integer(difftime(Sys.Date(), airbnb_clean$first_review, units = "days")/365)
+
+# Replace NA values with 0
+airbnb_clean$first_review_since[is.na(airbnb_clean$first_review_since)] <- 0
+
+sum(is.na(airbnb_clean$first_review_since))
+
+table(airbnb_clean$first_review_since)
+
+
+# Create new columns
+airbnb_clean <- airbnb_clean %>%
+  # Calculate the average price per night
+  mutate(avg_price_per_night = price / minimum_nights) %>%
+  # Create a binary column for whether the property is located in a major city
+  mutate(is_major_city = ifelse(city_name %in% c("New York", "Los Angeles", "Chicago", "Houston", "Phoenix", "Philadelphia", "San Antonio", "San Diego", "Dallas", "San Jose"), "Yes", "No")) %>%
+  # Create a binary column for whether the property is located in a popular neighborhood
+  mutate(is_popular_neighborhood = ifelse(!is.na(host_neighbourhood) & host_neighbourhood %in% c("Manhattan", "Williamsburg", "Bedford-Stuyvesant", "Harlem", "Hell's Kitchen"), "Yes", "No")) %>%
+  # Create a binary column for whether the property is located in a highly rated neighborhood
+  mutate(is_highly_rated_neighborhood = ifelse(!is.na(neighborhood_overview) & grepl("5 stars", neighborhood_overview, ignore.case = TRUE), "Yes", "No")) %>%
+  # Create a binary column for whether the property is located in a desirable location (based on latitude and longitude)
+  mutate(is_desirable_location = ifelse(latitude > 40.6 & latitude < 40.9 & longitude > -74.05 & longitude < -73.85, "Yes", "No"))
+
+
+airbnb_clean <- airbnb_clean %>% mutate(is_major_city = factor(is_major_city))
+airbnb_clean <- airbnb_clean %>% mutate(is_popular_neighborhood = factor(is_popular_neighborhood))
+airbnb_clean <- airbnb_clean %>% mutate(is_desirable_location = factor(is_desirable_location))
+```
+
+```{r}
+# Define the dataset and column names
+
+num_groups <- 5
+group_width <- ceiling((max(airbnb_clean$price) - min(airbnb_clean$price)) / num_groups)
+
+# Create price groups
+airbnb_clean$price_groups <- cut(airbnb_clean$price, breaks = seq(min(airbnb_clean$price), max(airbnb_clean$price) + group_width, by = group_width), include.lowest = TRUE, labels = FALSE)
+
+```
+
+```{r}
+num_groups1 <- 5
+group_width <- ceiling((max(airbnb_clean$security_deposit) - min(airbnb_clean$security_deposit)) / num_groups1)
+
+# Create price groups
+airbnb_clean$security_deposit_groups <- cut(airbnb_clean$security_deposit, breaks = seq(min(airbnb_clean$security_deposit), max(airbnb_clean$security_deposit) + group_width, by = group_width), include.lowest = TRUE, labels = FALSE)
+```
+
+
+# More cleaning of features
+```{r}
+airbnb_clean <- airbnb_clean %>% 
+  mutate(host_gender = as.character(as.character(host_gender)))
+
+airbnb_clean <- airbnb_clean %>%
+  mutate(host_gender = as.factor(host_gender))
+
+airbnb_clean <- airbnb_clean %>%
+  mutate(price_groups = as.factor(price_groups))
+
+airbnb_clean <- airbnb_clean %>%
+  mutate(security_deposit_groups = as.factor(security_deposit_groups))
+
+airbnb_clean$description_length <- nchar(airbnb_clean$description)
+airbnb_clean$description_length[is.na(airbnb_clean$description_length)] <- 0
+
+sum(is.na(airbnb_clean$description_length))
+
+airbnb_clean$name_length <- nchar(airbnb_clean$name)
+airbnb_clean$name_length[is.na(airbnb_clean$name_length)] <- 0
+
+sum(is.na(airbnb_clean$name_length))
+
+table(airbnb_clean$neighborhood_overview_length)
+
+airbnb_clean$neighborhood_overview_length <- nchar(airbnb_clean$neighborhood_overview)
+airbnb_clean$neighborhood_overview_length[is.na(airbnb_clean$neighborhood_overview_length)] <- 0
+
+sum(is.na(airbnb_clean$neighborhood_overview_length))
+
+airbnb_clean$house_rules_length <- nchar(airbnb_clean$house_rules)
+airbnb_clean$house_rules_length[is.na(airbnb_clean$house_rules_length)] <- 0
+
+sum(is.na(airbnb_clean$house_rules_length))
+
+airbnb_clean$beds_per_bedroom <- as.integer(airbnb_clean$beds / airbnb_clean$bedrooms)
+table(airbnb_clean$beds_per_bedroom_cat)
+sum(is.na(airbnb_clean$beds_per_bedroom))
+airbnb_clean <- airbnb_clean %>%
+  mutate(beds_per_bedroom = as.factor(beds_per_bedroom))
+
+airbnb_clean$is_pet_friendly <- ifelse(grepl("pet|dog|cat", airbnb_clean$description, ignore.case = TRUE), "yes", "no")
+airbnb_clean <- airbnb_clean %>% mutate(is_pet_friendly = factor(is_pet_friendly))
+
+table(airbnb_clean$state)
+sum(is.na(airbnb_clean$state))
+
+airbnb_clean$free_extra_accommodation <- ifelse(airbnb_clean$extra_people <= 0, 1, 0)
+airbnb_clean <- airbnb_clean %>%
+  mutate(free_extra_accommodation = as.factor(free_extra_accommodation))
+```
+
+
+
+## Now select only certain columns that you are going to use in the modeling part.
+## nearest_attr_dist, nearest_attr_count, host_gender are the variables that are derived from external dataset.
+## number_of_amenities is derived from unstructured column amenities
+```{r}
+airbnb_features <- airbnb_clean %>%
+  select(accommodates, bedrooms, beds, one_bed_per_person, cancellation_policy, has_cleaning_fee, price, property_category, bed_category, bathrooms, charges_for_extra, host_acceptance, host_response, city_name, host_is_superhost, is_business_travel_ready, instant_bookable, host_identity_verified, has_min_nights, require_guest_phone_verification, require_guest_profile_picture, requires_license, room_type, has_security_deposit,  is_location_exact, guests_included, host_response_time, offlinegovernmentid, governmentid, room_type, has_hotel_license, has_min_weeks, availablity_30_perc, availablity_60_perc, availablity_90_perc, availablity_365_perc, has_house_rules, has_weekly_price, has_monthly_price, has_access_info, bathrooms_per_person, host_and_property_same_neighborhood, maximum_nights, cleaning_fee_less_than_130, total_years_service, first_review_since, number_of_id_verification_options, maximum_weeks, description_length, avg_price_per_night, price_for_extra, total_price, cleaning_fee, security_deposit, name_length, price_groups, host_gender, number_of_amenities, nearest_attr_dist, nearest_attr_count)
+
+# , host_gender, number_of_amenities, nearest_attr_dist, nearest_attr_count
+summary(airbnb_features)
+```
+
+
+# Creating plots for feature variables
+```{r}
+library(ggplot2)
+
+ggplot(data = airbnb_features, aes(x = price, y = ..density..)) +
+  geom_density() +
+  facet_wrap(~cancellation_policy, ncol = 2) +
+  ggtitle("Density plot of price by cancellation_policy") +
+  xlab("Price") +
+  ylab("Density") +
+  theme_bw()
+
+ggplot(data = airbnb_features, aes(x = price, y = ..density..)) +
+  geom_density() +
+  facet_wrap(~room_type, ncol = 2) +
+  ggtitle("Density plot of price by room_type") +
+  xlab("Price") +
+  ylab("Density") +
+  theme_bw()
+
+ggplot(data = airbnb_features, aes(x = price, y = ..density..)) +
+  geom_density() +
+  geom_vline(xintercept = median(airbnb_features$price), color = "red", linetype = "dashed", size = 1) +
+  ggtitle("Density plot of price with median line") +
+  xlab("Price") +
+  ylab("Density") +
+  theme_bw()
+
+ggplot(data = airbnb_features, aes(x = bedrooms, y = price)) +
+  geom_boxplot() +
+  ggtitle("Boxplot of price by number of bedrooms") +
+  xlab("Number of bedrooms") +
+  ylab("Price") +
+  theme_bw()
+
+ggplot(data = airbnb_features, aes(x = number_of_amenities, y = price)) +
+  geom_point() +
+  ggtitle("Scatter plot of price by number of amenities") +
+  xlab("Number of amenities") +
+  ylab("Price") +
+  theme_bw()
+
+ggplot(data = airbnb_features, aes(x = cleaning_fee_less_than_100, y = price)) +
+  geom_boxplot() +
+  ggtitle("Boxplot of price by cleaning fee less than 130") +
+  xlab("Cleaning fee less than 130") +
+  ylab("Price") +
+  theme_bw()
+
+ggplot(data = airbnb_features, aes(x = accommodates, y = price)) +
+  geom_point() +
+  ggtitle("Scatter plot of price by accommodates") +
+  xlab("Accommodates") +
+  ylab("Price") +
+  theme_bw()
+
+ggplot(data = airbnb_features, aes(x = bathrooms, y = price)) +
+  geom_point() +
+  ggtitle("Scatter plot of price by bathrooms") +
+  xlab("Bathrooms") +
+  ylab("Price") +
+  theme_bw()
+
+ggplot(data = airbnb_features, aes(x = total_years_service, y = price)) +
+  geom_point() +
+  ggtitle("Scatter plot of price by total years of service") +
+  xlab("Total years of service") +
+  ylab("Price") +
+  theme_bw()
+
+ggplot(data = airbnb_features, aes(x = property_category, y = price)) +
+  geom_boxplot() +
+  ggtitle("Boxplot of price by property category") +
+  xlab("Property category") +
+  ylab("Price")
+```
+
+## Now convert the features into dummy variables.
+
+```{r}
+# "Learn" the various dummy variable values (aka the values that each factor can be)
+dummy <- dummyVars( ~ . , data=airbnb_features, fullRank = TRUE)
+
+# Apply the learned dummy parameterization to the original data to turn it into dummy variables
+airbnb_X <- data.frame(predict(dummy, newdata = airbnb_features))
+```
+
+## Split the data back into train and test
+
+```{r}
+airbnb_train_X <- airbnb_X[1:99981,]
+airbnb_test_X <- airbnb_X[99982:112186,]
+
+nrow(airbnb_test_X)
+nrow(airbnb_train_X)
+nrow(airbnb_X)
+```
+
+## Split our training data into train and validation
+
+```{r} 
+train_X <- cbind(airbnb_train_X, airbnb_train_Y) %>%
+  select(-perfect_rating_score)
+
+train_insts = sample(nrow(train_X), .7*nrow(train_X))
+
+data_train <- train_X[train_insts,]
+
+data_valid <- train_X[-train_insts,]
+
+summary(train_X)
+```
+
+# Using Decision Trees and plotting its fitting curve
+```{r}
+library(tree)
+library(ROCR)
+
+mycontrol = tree.control(nobs = nrow(data_train), mincut = 1, minsize = 2, mindev = .001)
+full_tree <- tree(high_booking_rate~., data = data_train, control = mycontrol)
+full_tree_probs <- predict(full_tree, newdata = data_valid)[,2]
+
+pred_full_tree <- prediction(full_tree_probs, data_valid$high_booking_rate)
+
+performance(pred_full_tree, measure = "auc")@y.values[[1]]
+
+full_tree_train <- tree(high_booking_rate~., data = data_train, control = mycontrol)
+full_tree_probs_train <- predict(full_tree_train, newdata = data_train)[,2]
+
+pred_full_tree_train <- prediction(full_tree_probs_train, data_train$high_booking_rate)
+
+performance(pred_full_tree_train, measure = "auc")@y.values[[1]]
+
+# Fitting curve
+accuracy <- function(classifications, actuals){
+  correct_classifications <- ifelse(classifications == actuals, 1, 0)
+  acc <- sum(correct_classifications)/length(classifications)
+  return(acc)
+}
+
+treesizes <- c(2, 4, 6, 8, 10, 15, 20, 25, 30, 35, 40)
+
+tr_accs = rep(0, length(treesizes))
+va_accs = rep(0, length(treesizes))
+
+predict_accuracy <- function(pruned_tree, cutoff, data) {
+  tree_preds <- predict(pruned_tree, newdata=data)
+  tree_probs=tree_preds[,2]
+  classifications <- ifelse(tree_probs > cutoff, "YES", "NO") 
+  acc <- accuracy(classifications, data$high_booking_rate)
+  return(acc)
+}
+
+for(i in 1:length(treesizes)) {
+  tree_size <- treesizes[i]
+  pruned_tree = prune.tree(full_tree, best = tree_size)
+  
+  x <- predict_accuracy(pruned_tree, 0.5, data_train)
+  tr_accs[i] <- x
+
+  y <- predict_accuracy(pruned_tree, 0.5, data_valid)
+  va_accs[i] <- y
+}
+
+plot(treesizes, tr_accs, col = "blue", type = 'l', xlab = "Tree Size", ylab = "Accuracy")
+lines(treesizes, va_accs, col = "red")
+legend(20,0.78,c("Train","Valid"), lwd=c(2,2), col=c("blue","red"), y.intersp=1.5)
+```
+
+
+# Calculating the importance of each feature that is currently considered for analyzing if they are actually helping in predicting.
+# Note this takes a while to run
+```{r}
+# Train the random forest model
+rf_model <- randomForest(high_booking_rate ~ ., data = data_train, importance = TRUE)
+
+# Get the feature importance
+importance <- rf_model$importance
+importance_df <- data.frame(feature = row.names(importance), mean_decrease_gini = importance[, "MeanDecreaseGini"])
+
+# Order the features by importance
+importance_df <- importance_df[order(-importance_df$mean_decrease_gini), ]
+
+# Print the feature importance
+print(importance_df)
+```
+
+
+# Running our best model - XG Boost
+```{r}
+library(xgboost)
+
+data_train$high_booking_rate <- ifelse(data_train$high_booking_rate == 'YES', 1, 0)
+
+train_matrix <- as.matrix(data_train[, -which(names(data_train) == "high_booking_rate")])
+
+test_matrix <- as.matrix(data_valid[, -which(names(data_train) == "high_booking_rate")])
+
+bst <- xgboost(data = train_matrix, label = data_train$high_booking_rate, max.depth = 5, eta = 0.1, nrounds = 1000,  objective = "binary:logistic", verbosity = 0, verbose = 0)
+
+preds_bst <- predict(bst, test_matrix)
+
+xg_preds_full <- prediction(preds_bst, data_valid$high_booking_rate)
+xg_boost_auc <- performance(xg_preds_full, measure = "auc")@y.values[[1]]
+
+auc_msg <- paste("AUC with all external dataset parameter and number of amenities column and tuned hyper parameter", xg_boost_auc)
+
+print(auc_msg)
+```
+
+# Output to csv
+```{r}
+# Convert data frame to matrix
+airbnb_test_X_mat <- as.matrix(airbnb_test_X)
+
+# Create DMatrix
+dtest <- xgb.DMatrix(data = airbnb_test_X_mat)
+
+# Make predictions
+probs_rate <- predict(bst, newdata = dtest, type = "response")
+
+write.table(probs_rate, "high_booking_rate_group07.csv", row.names = FALSE)
+```
+
+# Training Performance
+```{r}
+preds_bst_train <- predict(bst, train_matrix)
+
+xg_preds_full_train <- prediction(preds_bst_train, data_train$high_booking_rate)
+performance(xg_preds_full_train, measure = "auc")@y.values[[1]]
+```
+
+# Plot the fitting curve for XG Boost
+```{r}
+library(xgboost)
+library(ROCR)
+
+# Convert target variable to numeric
+data_train$high_booking_rate <- ifelse(data_train$high_booking_rate == 'YES', 1, 0)
+
+# Create matrices for training and testing data
+train_matrix <- as.matrix(data_train[, -which(names(data_train) == "high_booking_rate")])
+test_matrix <- as.matrix(data_valid[, -which(names(data_train) == "high_booking_rate")])
+
+# Set up a range of hyperparameter values to test
+nrounds_values <- c(100, 400, 500, 900, 1400)
+eta <- 0.1
+
+# Storage for results
+auc_values <- numeric(length(nrounds_values))
+
+# Iterate over hyperparameter values
+for (i in 1:length(nrounds_values)) {
+  # Train the XGBoost model
+  bst <- xgboost(
+    data = train_matrix,
+    label = data_train$high_booking_rate,
+    max.depth = 5,
+    eta = eta,
+    nrounds = nrounds_values[i],
+    objective = "binary:logistic",
+    verbosity = 0,
+    verbose = 0
+  )
+
+  # Make predictions on the test data
+  preds <- predict(bst, test_matrix)
+
+  # Calculate AUC
+  xg_preds <- prediction(preds, data_valid$high_booking_rate)
+  auc_values[i] <- performance(xg_preds, measure = "auc")@y.values[[1]]
+}
+
+# Plot the fitting curve
+plot(nrounds_values, auc_values, type = "b", pch = 16,
+     xlab = "Number of Trees", ylab = "AUC", main = "Fitting Curve")
+```
+
+
+# Plotting ROC Curve
+```{r}
+# ROC curve
+# Load necessary libraries
+library(pROC)
+library(ggplot2)
+
+# Convert the prediction probabilities to binary predictions
+binary_preds <- ifelse(preds_bst >= 0.5, 1, 0)
+
+# Generate the ROC curve and calculate AUC
+roc_curve <- roc(data_valid$high_booking_rate, preds_bst)
+auc_value <- auc(roc_curve)
+
+# Get the coordinates for plotting the ROC curve
+roc_coords <- coords(roc_curve)
+
+# Plot the ROC curve
+ggplot() +
+  geom_line(data = roc_coords, aes(1 - specificity, sensitivity)) +
+  geom_abline(linetype = "dashed") +
+  labs(x = "False Positive Rate (1 - Specificity)",
+       y = "True Positive Rate (Sensitivity)",
+       title = paste("ROC Curve (AUC =", auc_value, ")"))
+```
+
+
+# Learning curve for XG boost
+```{r}
+# Convert high_booking_rate to binary labels
+data_train$high_booking_rate <- ifelse(data_train$high_booking_rate == 'YES', 1, 0)
+
+# Convert data_train and data_valid to matrices
+train_matrix <- as.matrix(data_train[, -which(names(data_train) == "high_booking_rate")])
+test_matrix <- as.matrix(data_valid[, -which(names(data_valid) == "high_booking_rate")])
+
+# Set up parameters for XGBoost
+params <- list(
+  max_depth = 5,
+  eta = 0.1,
+  objective = "binary:logistic",
+  verbose = 0
+)
+
+# Function to calculate AUC
+calculate_auc <- function(train_matrix, train_labels, test_matrix, test_labels, params) {
+  dtrain <- xgb.DMatrix(data = train_matrix, label = train_labels)
+  dtest <- xgb.DMatrix(data = test_matrix, label = test_labels)
+  
+  bst <- xgb.train(params = params, data = dtrain, nrounds = params$nrounds)
+  preds_bst <- predict(bst, dtest)
+  
+  xg_preds_full <- prediction(preds_bst, test_labels)
+  auc <- performance(xg_preds_full, measure = "auc")@y.values[[1]]
+  
+  return(auc)
+}
+
+# Create learning curve
+learning_curve <- function(train_matrix, train_labels, test_matrix, test_labels, sample_sizes, params) {
+  auc_values <- numeric(length(sample_sizes))
+  
+  for (i in 1:length(sample_sizes)) {
+    sample_size <- sample_sizes[i]
+    sample_indices <- sample(1:nrow(train_matrix), sample_size)
+    sample_train_matrix <- train_matrix[sample_indices, ]
+    sample_train_labels <- train_labels[sample_indices]
+    
+    auc <- calculate_auc(sample_train_matrix, sample_train_labels, test_matrix, test_labels, params)
+    auc_values[i] <- auc
+  }
+  
+  plot(sample_sizes, auc_values, type = "l", xlab = "Sample Size", ylab = "AUC",
+       main = "Learning Curve")
+}
+
+# Set up sample sizes
+sample_sizes <- seq(0.1, 1, by = 0.1) * nrow(train_matrix)
+
+# Set up the number of rounds (you can adjust this value)
+params$nrounds <- 1000
+
+# Create the learning curve
+learning_curve(train_matrix, data_train$high_booking_rate, test_matrix, data_valid$high_booking_rate, sample_sizes, params)
+```
+
+
+# Performing Grid search on XG boost model to identify the best hyper parameters.
+# The best hyperparameters are eta - 0.1, max.depth - 5, nrounds - 1000
+```{r}
+grid_search <- function(){
+  
+  #three hyperparameters can possibly really change predictive performance of xgboost (although maybe not)
+  depth_choose <- c(2, 5, 10, 20, 50, 100)
+  nrounds_choose <- c(100, 500, 1000, 1500, 2000, 2500)
+  eta_choose <- c(.1, .2, .3, 1)
+  
+  #nested loops to tune these three parameters
+  print('depth, nrounds, eta, accuracy')
+  for(i in c(1:length(depth_choose))){
+    for(j in c(1:length(nrounds_choose))){
+      for(k in c(1:length(eta_choose))){
+        thisdepth <- depth_choose[i]
+        thisnrounds <- nrounds_choose[j]
+        thiseta <- eta_choose[k]
+        
+        bst <-
+          xgboost(
+            data = train_matrix,
+            label = data_train$high_booking_rate,
+            max.depth = thisdepth,
+            eta = thiseta,
+            nrounds = thisnrounds,
+            objective = "binary:logistic",
+            verbosity = 0,
+            verbose = 0
+          )
+        
+        preds_bst <- predict(bst, test_matrix)
+        
+        xg_preds_full <- prediction(preds_bst, data_valid$high_booking_rate)
+        auc <- performance(xg_preds_full, measure = "auc")@y.values[[1]]
+
+        
+        #print the performance for every combination
+        print(paste(thisdepth, thisnrounds, thiseta, auc, sep = ", "))
+        
+      }
+    }
+  }
+}
+
+# uncomment this line to run the hyperparameter grid search
+#grid_search()
+```
+
+
+## Logistic model to predict high booking rate
+```{r}
+logistic_rate <- glm(high_booking_rate~., data = data_train, family = "binomial")
+probs_rate_train <- predict(logistic_rate, newdata = data_train, type = "response")
+probs_rate_test <- predict(logistic_rate, newdata = data_valid, type = "response")
+```
+
+
+## predictions
+
+```{r}
+pred_full_train <- prediction(probs_rate_train, data_train$high_booking_rate)
+pred_full_test <- prediction(probs_rate_test, data_valid$high_booking_rate)
+
+performance(pred_full_train, measure = "auc")@y.values[[1]]
+performance(pred_full_test, measure = "auc")@y.values[[1]]
+```
+
+
+## Run the model on the actual test data and output it to a file
+
+```{r}
+probs_rate <- predict(logistic_rate, newdata = airbnb_test_X, type = "response")
+write.table(probs_rate, "high_booking_rate_group07.csv", row.names = FALSE)
+```
+
+## Ridge logistic regression model
+```{r}
+# Train data for regularized logistic model
+reg_data_train_y <- data_train$high_booking_rate
+
+reg_data_train_x <- data_train %>%
+  select(-high_booking_rate)
+
+# Test data for regularized logisitc model
+reg_data_valid_y <- data_valid$high_booking_rate
+
+reg_data_valid_x <- data_valid %>%
+  select(-high_booking_rate)
+
+# Create a grid of lambda values to try
+grid <- 10^seq(-7,7,length=100)
+
+#glmnet automatically does cross-validation for you, you just need to specify k. Let's try k=5.
+k<-5
+
+#family="binomial" yields logistic regression; family="gaussian" yields linear regression
+#alpha = 1 yields the lasso penalty, and alpha= 0 the ridge penalty
+ridge_cv.out <- cv.glmnet(as.matrix(reg_data_train_x), reg_data_train_y, family="binomial", alpha=0, lambda=grid, nfolds=k)
+plot(ridge_cv.out)
+
+#get the lambda that gave the lowest cross-validated error
+ridge_bestlam <- ridge_cv.out$lambda.min
+ridge_coeffs <- coef(ridge_cv.out, s = "lambda.min")
+
+#you have to add type="response" to get probabilities for logistic regression
+preds_ridge <- predict(ridge_cv.out, s=ridge_bestlam, newx = as.matrix(reg_data_valid_x),type="response")
+
+#you can also plot a fitting curve
+ridge_lambdas <- ridge_cv.out$lambda
+ridge_errors <- ridge_cv.out$cvm
+
+ridge_bestlam
+
+
+# AUC for Ridge
+preds_ridge_full <- prediction(preds_ridge, reg_data_valid_y)
+performance(preds_ridge_full, measure = "auc")@y.values[[1]]
+```
+
+
+## Lasso logisitc regression model
+```{r}
+#family="binomial" yields logistic regression; family="gaussian" yields linear regression
+#alpha = 1 yields the lasso penalty, and alpha= 0 the ridge penalty
+lasso_cv.out <- cv.glmnet(as.matrix(reg_data_train_x), reg_data_train_y, family="binomial", alpha=1, lambda=grid, nfolds=k)
+plot(lasso_cv.out)
+
+
+#get the lambda that gave the lowest cross-validated error
+lasso_bestlam <- lasso_cv.out$lambda.min
+lasso_coeffs <- coef(lasso_cv.out, s = "lambda.min")
+
+#you have to add type="response" to get probabilities for logistic regression
+preds_lasso <- predict(lasso_cv.out, s=lasso_bestlam, newx = as.matrix(reg_data_valid_x),type="response")
+
+#you can also plot a fitting curve
+lasso_lambdas <- lasso_cv.out$lambda
+lasso_errors <- lasso_cv.out$cvm
+
+lasso_bestlam
+
+
+# AUC for Ridge
+preds_lasso_full <- prediction(preds_lasso, reg_data_valid_y)
+performance(preds_lasso_full, measure = "auc")@y.values[[1]]
+```
+
+
+## Random Forest model to predict high booking rate
+```{r}
+rf.mod <- ranger(high_booking_rate ~ ., data = data_train,
+                mtry=6, 
+                num.trees=900,
+                importance="impurity",
+                probability = TRUE)
+
+preds_rf <- predict(rf.mod, data=data_valid)$predictions[,2]
+
+rf_preds_full <- prediction(preds_rf, data_valid$high_booking_rate)
+performance(rf_preds_full, measure = "auc")@y.values[[1]]
+
+```
+# Training Performance
+```{r}
+preds_rf_train <- predict(rf.mod, data=data_train)$predictions[,2]
+
+rf_preds_full_train <- prediction(preds_rf_train, data_train$high_booking_rate)
+performance(rf_preds_full_train, measure = "auc")@y.values[[1]]
+```
+
+# Plot the Fitting Curve for random Forest
+```{r}
+library(randomForest)
+
+# Create a range of hyperparameter values to test
+n_trees_values <- c(100, 400, 500, 900, 1400)
+
+# Storage for results
+accuracy_values <- numeric(length(n_trees_values))
+
+# Iterate over the hyperparameter values
+for (i in 1:length(n_trees_values)) {
+  # Train the random forest model
+  rf_model <- randomForest(high_booking_rate ~ ., data = data_train, ntree = n_trees_values[i], importance = TRUE)
+  
+  # Make predictions on the test data
+  preds <- predict(rf_model, data_valid)
+  print(i)
+  # Calculate accuracy
+  accuracy_values[i] <- mean(preds == data_valid$high_booking_rate)
+}
+
+# Plot the fitting curve
+plot(n_trees_values, accuracy_values, type = "b", pch = 16,
+     xlab = "Number of Trees", ylab = "Accuracy", main = "Fitting Curve")
+```
+
+
+
+## Grid search for mtry and num.trees hyperparamter tuning for random forest
+```{r}
+grid_search <- function(){
+  
+  #two hyperparameters can possibly really change predictive performance of random forest(although maybe not)
+  mtry_choose <- seq(5,15,by=1)
+  num_trees_choose <- seq(500,1000,by=50)
+  
+  #nested loops to tune these three parameters
+  print('mtry, num_trees, auc')
+  for(i in c(1:length(mtry_choose))){
+    for(j in c(1:length(num_trees_choose))){
+      thismtry <- mtry_choose[i]
+      thisnum_trees <- num_trees_choose[j]
+        
+      inner_rf <- ranger(high_booking_rate ~ ., data = data_train, mtry=thismtry, num.trees=thisnum_trees, importance="impurity", probability = TRUE)
+        
+        inner_rf_pred <- predict(inner_rf, data=data_valid)$predictions[,2]
+        #inner_rf_classifications <- ifelse(inner_bst_pred > 0.5, 1, 0)
+        #inner_rf_acc <- mean(ifelse(inner_bst_classifications == va_y_num, 1, 0))
+        
+        inner_rf_preds_full <- prediction(inner_rf_pred, data_valid$high_booking_rate)
+        inner_rf_auc <- performance(inner_rf_preds_full, measure = "auc")@y.values[[1]]
+        
+        
+        #print the performance for every combination
+        print(paste(thismtry, thisnum_trees, inner_rf_auc, sep = ", "))
+        
+    }
+  }
+}
+
+#grid_search()
+
+# Got highest auc for 6 mtry with 900 trees.
+```
+
