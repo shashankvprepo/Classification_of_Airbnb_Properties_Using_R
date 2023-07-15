@@ -9,7 +9,7 @@ The target therefore, is to try to classify the property as accurately as possib
 **Training Dataset:**
 You can access the training dataset [here](https://umd0-my.sharepoint.com/:x:/g/personal/svpatil_umd_edu/EU4A454xVJBAouxGGi9aVUUBfa2PYL5ty2vxzp6_04DKFw?e=AEl4Rf)
 
-**Other datasets:**
+**Other Datasets:**
 The following files are included in the airbnb_dataset zip file file:
 1. **airbnb_test_x_2023**   -> Dataset contains test data input features
 2. **airbnb_train_y_2023**  -> Dataset contains training data output features
