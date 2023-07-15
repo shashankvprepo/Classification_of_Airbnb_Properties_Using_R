@@ -7,7 +7,7 @@ The target therefore is to try to classify the property as accurately as possibl
 ## Datasets
 
 **Training Dataset:**
-You can access the training dataset [here]([https://umd0-my.sharepoint.com/:x:/g/personal/svpatil_umd_edu/EU4A454xVJBAouxGGi9aVUUB5z6NorXQUKdrCONS9XDXjw?e=za3rhB&nav=MTVfezU3RUJEMTVGLTM0NEUtNDJDMi04RjZDLUEwNTM2MTQ3REM0Nn0](https://umd0-my.sharepoint.com/:x:/g/personal/svpatil_umd_edu/EU4A454xVJBAouxGGi9aVUUBfa2PYL5ty2vxzp6_04DKFw?e=AEl4Rf))
+You can access the training dataset [here](https://umd0-my.sharepoint.com/:x:/g/personal/svpatil_umd_edu/EU4A454xVJBAouxGGi9aVUUBfa2PYL5ty2vxzp6_04DKFw?e=AEl4Rf)
 
 **Other datasets:**
 The following files are included in the airbnb_dataset zip file file:
