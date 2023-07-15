@@ -1,8 +1,8 @@
 # Airbnb Property Classification
 
 ## Introduction
-Airbnb is one of the biggest names in the property market, with millions of listings on its platform. With the treasure trove of data it generates about the properties, many business inights that shed light on renters' preferences would help guide its strategy. In that direction, predicting if the property would have a high booking rate based on other features would be a great step that would aid it to predict the property's likelihood of being booked for the most part of the year.
-The target therefore is to try to classify the property as accurately as possible by targetting maximum achievable AUC (Area under the curve)
+Airbnb is one of the biggest names in the property market, with millions of listings on its platform. With the treasure trove of data it generates about the properties, many business inights that shed light on renters' preferences would help guide its strategy. In that direction, predicting if the property would have a high booking rate based on other features would be a great step that would aid it to predict the property's likelihood of being booked for the most part of the year.  
+The target therefore, is to try to classify the property as accurately as possible by targetting maximum achievable AUC (Area under the curve)
 
 ## Datasets
 
